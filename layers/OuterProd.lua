@@ -1,5 +1,5 @@
 --[[
-
+EDIT: ADDED BATCH DIMENSION
   Input: a table of 2 or 3 vectors.
 
   Output: the outer product of the vectors.
@@ -16,23 +16,23 @@ end
 function OuterProd:updateOutput(input)
   local order = #input
   self.order = order
+  local n = input[1]:size(1)
+  local m = {}
+  for i=1,order do m[i]=input[i]:size(2) end
+
   if order == 2 then
-    self.output:set(torch.ger(input[1], input[2]))
+    self.output:set(torch.cmul(
+      input[1]:view(n, m[1], 1):expand(n, m[1], m[2]), 
+      input[2]:view(n, 1, m[2]):expand(n, m[1], m[2])))
     self.size = self.output:size()
   elseif order == 3 then
-    -- allocate
-    self.size = torch.LongStorage(order)
-    local idx = 1
-    for i = 1, order do
-      self.size[i] = input[i]:size(1)
-    end
-    self.output:resize(self.size):zero()
+    self.output:set(
+      torch.cmul(torch.cmul(
+        input[1]:view(n, m[1], 1, 1):expand(n, m[1], m[2], m[3]), 
+        input[2]:view(n, 1, m[2], 1):expand(n, m[1], m[2], m[3])),
+        input[3]:view(n, 1, 1, m[3]):expand(n, m[1], m[2], m[3])))        
 
-    local u, v, w = unpack(input)
-    local uv = torch.ger(u, v)
-    for i = 1, self.size[3] do
-      self.output[{{}, {}, i}]:add(w[i], uv)
-    end
+    self.size = self.output:size()
   else
     error('outer products of order higher than 3 unsupported')
   end
@@ -46,24 +46,36 @@ function OuterProd:updateGradInput(input, gradOutput)
     self.gradInput[i]:resizeAs(input[i])
   end
 
-  if order == 2 then
-    self.gradInput[1]:copy(gradOutput * input[2])
-    self.gradInput[2]:copy(gradOutput:t() * input[1])
-  else
-    local u, v, w = unpack(input)
-    local du, dv, dw = u:size(1), v:size(1), w:size(1)
-    local uv = input[1].new():resize(du, dv):zero()
-    for i = 1, dw do
-      uv:add(w[i], gradOutput[{{}, {}, i}])
-    end
-    self.gradInput[1]:copy(uv * input[2])
-    self.gradInput[2]:copy(uv:t() * input[1])
+  local n = input[1]:size(1)
+  local m = {}
+  for i=1,order do m[i]=input[i]:size(2) end
 
-    local vw = input[1].new():resize(dv, dw):zero()
-    for i = 1, du do
-      vw:add(u[i], gradOutput[{i, {}, {}}])
-    end
-    self.gradInput[3]:copy(vw:t() * input[2])
+  if order == 2 then
+    self.gradInput[1]:copy(torch.cmul(
+      gradOutput,
+      input[2]:view(n, 1, m[2]):expand(n, m[1], m[2])
+    ):sum(3))
+    self.gradInput[2]:copy(torch.cmul(
+      gradOutput,
+      input[1]:view(n, m[1], 1):expand(n, m[1], m[2])
+    ):sum(2))
+  else
+    self.gradInput[1]:copy(torch.cmul(torch.cmul(
+      gradOutput,
+      input[2]:view(n, 1, m[2], 1):expand(n, m[1], m[2], m[3])),
+      input[3]:view(n, 1, 1, m[3]):expand(n, m[1], m[2], m[3])
+    ):sum(4):sum(3))
+    self.gradInput[2]:copy(torch.cmul(torch.cmul(
+      gradOutput,
+      input[1]:view(n, m[1], 1, 1):expand(n, m[1], m[2], m[3])),
+      input[3]:view(n, 1, 1, m[3]):expand(n, m[1], m[2], m[3])
+    ):sum(4):sum(2))
+    self.gradInput[3]:copy(torch.cmul(torch.cmul(
+      gradOutput,
+      input[1]:view(n, m[1], 1, 1):expand(n, m[1], m[2], m[3])),
+      input[2]:view(n, 1, m[2], 1):expand(n, m[1], m[2], m[3])
+    ):sum(3):sum(2))
   end
+
   return self.gradInput
 end

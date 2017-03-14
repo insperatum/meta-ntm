@@ -1,5 +1,5 @@
 --[[
-
+EDIT: ADDED BATCH DIMENSION
  Input: A table {x, k} of a vector x and a convolution kernel k.
 
  Output: Circular convolution of x with k.
@@ -17,17 +17,17 @@ end
 
 function rotate_left(input, step)
   local output = input.new():resizeAs(input)
-  local size = input:size(1)
-  output[{{1, size - step}}] = input[{{step + 1, size}}]
-  output[{{size - step + 1, size}}] = input[{{1, step}}]
+  local size = input:size(2)
+  output[{{}, {1, size - step}}] = input[{{}, {step + 1, size}}]
+  output[{{}, {size - step + 1, size}}] = input[{{}, {1, step}}]
   return output
 end
 
 function rotate_right(input, step)
   local output = input.new():resizeAs(input)
-  local size = input:size(1)
-  output[{{step + 1, size}}] = input[{{1, size - step}}]
-  output[{{1, step}}] = input[{{size - step + 1, size}}]
+  local size = input:size(2)
+  output[{{}, {step + 1, size}}] = input[{{}, {1, size - step}}]
+  output[{{}, {1, step}}] = input[{{}, {size - step + 1, size}}]
   return output
 end
 
@@ -61,16 +61,20 @@ end
 
 function CircularConvolution:updateOutput(input)
   local v, k = unpack(input)
-  self.size = v:size(1)
-  self.kernel_size = k:size(1)
+  self.size = v:size(2)
+  self.kernel_size = k:size(2)
   self.kernel_shift = math.floor(self.kernel_size / 2)
-  self.output = v.new():resize(self.size):zero()
+  self.output = v.new():resize(v:size(1), self.size):zero()
   for i = 1, self.size do
     for j = 1, self.kernel_size do
       local idx = i + self.kernel_shift - j + 1
       if idx < 1 then idx = idx + self.size end
       if idx > self.size then idx = idx - self.size end
-      self.output[{{i}}]:add(k[j] * v[idx])
+
+      self.output[{{}, {i}}]:add(
+        torch.cmul(
+          k[{{}, j}]:reshape(k:size(1), 1):expandAs(v[{{}, idx}]),
+          v[{{}, idx}]))
     end
   end
   return self.output
@@ -80,17 +84,17 @@ function CircularConvolution:updateGradInput(input, gradOutput)
   local v, k = unpack(input)
   self.gradInput[1] = self.gradInput[1] or v.new()
   self.gradInput[2] = self.gradInput[2] or k.new()
-  self.gradInput[1]:resize(self.size)
-  self.gradInput[2]:resize(self.kernel_size)
+  self.gradInput[1]:resize(v:size(1), self.size)
+  self.gradInput[2]:resize(v:size(1), self.kernel_size)
 
-  local gradOutput2 = rotate_right(gradOutput:repeatTensor(1, 2):view(2 * self.size), self.kernel_shift)
+  local gradOutput2 = rotate_right(gradOutput:repeatTensor(1, 2):view(v:size(1), 2 * self.size), self.kernel_shift)
   for i = 1, self.size do
-    self.gradInput[1][i] = k:dot(gradOutput2:narrow(1, i, self.kernel_size))
+    self.gradInput[1][{{}, {i}}] = torch.cmul(k, gradOutput2:narrow(2, i, self.kernel_size)):sum(2)
   end
 
-  local v2 = rotate_left(v:repeatTensor(1, 2):view(2 * self.size), self.kernel_shift + 1)
+  local v2 = rotate_left(v:repeatTensor(1, 1, 2):view(v:size(1), 2 * self.size), self.kernel_shift + 1)
   for i = 1, self.kernel_size do
-    self.gradInput[2][i] = gradOutput:dot(v2:narrow(1, self.size - i + 1, self.size))
+    self.gradInput[2][{{}, {i}}] = torch.cmul(gradOutput, v2:narrow(2, self.size - i + 1, self.size)):sum(2)
   end
   return self.gradInput
 end

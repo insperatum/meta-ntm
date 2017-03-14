@@ -34,53 +34,54 @@ function NTM:__init(config)
   self.shift_range = config.shift_range or 1
   self.write_heads = config.write_heads or 1
   self.read_heads  = config.read_heads  or 1
+  self.batch_size  = config.batch_size
 
   self.depth = 0
   self.cells = {}
   self.master_cell = self:new_cell()
-  self.init_module = self:new_init_module()
+  self.init_module = self:new_init_module(batch_size)
 
+  self.zeroTensor = torch.zeros(self.batch_size, 1)
   self:init_grad_inputs()
 end
 
 function NTM:init_grad_inputs()
   local ww_gradInput
   if self.write_heads == 1 then
-    ww_gradInput = torch.zeros(self.mem_rows)
+    ww_gradInput = torch.zeros(self.batch_size, self.mem_rows)
   else
     ww_gradInput = {}
     for i = 1, self.write_heads do
-      ww_gradInput[i] = torch.zeros(self.mem_rows)
+      ww_gradInput[i] = torch.zeros(self.batch_size, self.mem_rows)
     end
   end
 
-  local wr_gradInput, r_gradInput
   if self.read_heads == 1 then
-    wr_gradInput = torch.zeros(self.mem_rows)
-    r_gradInput = torch.zeros(self.mem_cols)
+    wr_gradInput = torch.zeros(self.batch_size, self.mem_rows)
+    r_gradInput = torch.zeros(self.batch_size, self.mem_cols)
   else
     wr_gradInput, r_gradInput = {}, {}
     for i = 1, self.read_heads do
-      wr_gradInput[i] = torch.zeros(self.mem_rows) 
-      r_gradInput[i] = torch.zeros(self.mem_cols)
+      wr_gradInput[i] = torch.zeros(self.batch_size, self.mem_rows) 
+      r_gradInput[i] = torch.zeros(self.batch_size, self.mem_cols)
     end
   end
 
   local m_gradInput, c_gradInput
   if self.cont_layers == 1 then
-    m_gradInput = torch.zeros(self.cont_dim)
-    c_gradInput = torch.zeros(self.cont_dim)
+    m_gradInput = torch.zeros(self.batch_size, self.cont_dim)
+    c_gradInput = torch.zeros(self.batch_size, self.cont_dim)
   else
     m_gradInput, c_gradInput = {}, {}
     for i = 1, self.cont_layers do
-      m_gradInput[i] = torch.zeros(self.cont_dim)
-      c_gradInput[i] = torch.zeros(self.cont_dim)
+      m_gradInput[i] = torch.zeros(self.batch_size, self.cont_dim)
+      c_gradInput[i] = torch.zeros(self.batch_size, self.cont_dim)
     end
   end
 
   self.gradInput = {
-    torch.zeros(self.input_dim), -- input
-    torch.zeros(self.mem_rows, self.mem_cols), -- M
+    torch.zeros(self.batch_size, self.input_dim), -- input
+    torch.zeros(self.batch_size, self.mem_rows, self.mem_cols), -- M
     wr_gradInput,
     ww_gradInput,
     r_gradInput,
@@ -173,6 +174,7 @@ function NTM:new_cell()
 
   local cell = nn.gModule(inputs, outputs)
   if self.master_cell ~= nil then
+    cell:type(self.zeroTensor:type())
     share_params(cell, self.master_cell, 'weight', 'bias', 'gradWeight', 'gradBias')
   end
   return cell
@@ -342,7 +344,7 @@ function NTM:forward(input)
   
   local prev_outputs
   if self.depth == 1 then
-    prev_outputs = self.init_module:forward(torch.Tensor{0})
+    prev_outputs = self.init_module:forward(self.zeroTensor)
   else
     prev_outputs = self.cells[self.depth - 1].output
   end
@@ -372,7 +374,7 @@ function NTM:backward(input, grad_output)
   -- get inputs
   local prev_outputs
   if self.depth == 1 then
-    prev_outputs = self.init_module:forward(torch.Tensor{0})
+    prev_outputs = self.init_module:forward(self.zeroTensor)
   else
     prev_outputs = self.cells[self.depth - 1].output
   end
@@ -384,7 +386,7 @@ function NTM:backward(input, grad_output)
   self.gradInput = cell:backward(inputs, grad_outputs)
   self.depth = self.depth - 1
   if self.depth == 0 then
-    self.init_module:backward(torch.Tensor{0}, self.gradInput)
+    self.init_module:backward(self.zeroTensor, self.gradInput)
     for i = 1, #self.gradInput do
       local gradInput = self.gradInput[i]
       if type(gradInput) == 'table' then

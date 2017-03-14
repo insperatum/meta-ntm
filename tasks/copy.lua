@@ -13,6 +13,11 @@ require('./util')
 require('optim')
 require('sys')
 
+function maybeCuda(x)
+  return x
+  -- return x:cuda()
+end
+
 torch.manualSeed(0)
 
 -- NTM config
@@ -21,19 +26,22 @@ local config = {
   output_dim = 10,
   mem_rows = 128,
   mem_cols = 20,
-  cont_dim = 100
+  cont_dim = 100,
+  batch_size = 2
 }
 
 local input_dim = config.input_dim
-local start_symbol = torch.zeros(input_dim)
-start_symbol[1] = 1
-local end_symbol = torch.zeros(input_dim)
-end_symbol[2] = 1
+local start_symbol = maybeCuda(torch.zeros(config.batch_size, input_dim))
+start_symbol[{{}, 1}] = 1
+local end_symbol = maybeCuda(torch.zeros(config.batch_size, input_dim))
+end_symbol[{{}, 1}] = 1
 
-function generate_sequence(len, bits)
-  local seq = torch.zeros(len, bits + 2)
+local zeros = maybeCuda(torch.zeros(config.batch_size, input_dim))
+
+function generate_sequence(len, batch_size, bits)
+  local seq = maybeCuda(torch.zeros(len, batch_size, bits + 2))
   for i = 1, len do
-    seq[{i, {3, bits + 2}}] = torch.rand(bits):round()
+    seq[{i, {}, {3, bits + 2}}] = torch.rand(batch_size, bits):round()
   end
   return seq
 end
@@ -56,14 +64,13 @@ function forward(model, seq, print_flag)
   model:forward(end_symbol)
 
   -- present targets
-  local zeros = torch.zeros(input_dim)
-  local outputs = torch.Tensor(len, input_dim)
+  local outputs = maybeCuda(torch.Tensor(len, config.batch_size, input_dim))
   local criteria = {}
   if print_flag then print('read head max') end
   for j = 1, len do
-    criteria[j] = nn.BCECriterion()
+    criteria[j] = maybeCuda(nn.MultiCriterion():add(nn.BCECriterion(), 1/len))
     outputs[j] = model:forward(zeros)
-    loss = loss + criteria[j]:forward(outputs[j], seq[j]) * input_dim
+    loss = loss + criteria[j]:forward(outputs[j], seq[j])
     if print_flag then print_read_max(model) end
   end
   return outputs, criteria, loss
@@ -71,14 +78,8 @@ end
 
 function backward(model, seq, outputs, criteria)
   local len = seq:size(1)
-  local zeros = torch.zeros(input_dim)
   for j = len, 1, -1 do
-    model:backward(
-      zeros,
-      criteria[j]
-        :backward(outputs[j], seq[j])
-        :mul(input_dim)
-      )
+    model:backward(zeros, criteria[j]:backward(outputs[j], seq[j]))
   end
 
   model:backward(end_symbol, zeros)
@@ -88,12 +89,12 @@ function backward(model, seq, outputs, criteria)
   model:backward(start_symbol, zeros)
 end
 
-local model = ntm.NTM(config)
+local model = maybeCuda(ntm.NTM(config))
 local params, grads = model:getParameters()
 
 local num_iters = 10000
 local start = sys.clock()
-local print_interval = 25
+local print_interval = 5
 local min_len = 1
 local max_len = 20
 
@@ -105,15 +106,7 @@ print('max sequence length = ' .. max_len)
 print(string.rep('=', 80))
 print('num params: ' .. params:size(1))
 
-local rmsprop_state = {
-  learningRate = 1e-4,
-  momentum = 0.9,
-  decay = 0.95
-}
-
--- local adagrad_state = {
---   learningRate = 1e-3
--- }
+local adam_state = {learningRate = 0.01}
 
 -- train
 for iter = 1, num_iters do
@@ -122,9 +115,7 @@ for iter = 1, num_iters do
     if print_flag then
       print(string.rep('-', 80))
       print('iter = ' .. iter)
-      print('learn rate = ' .. rmsprop_state.learningRate)
-      print('momentum = ' .. rmsprop_state.momentum)
-      print('decay = ' .. rmsprop_state.decay)
+      print('learn rate = ' .. adam_state.learningRate)
       printf('t = %.1fs\n', sys.clock() - start)
     end
 
@@ -132,15 +123,15 @@ for iter = 1, num_iters do
     grads:zero()
 
     local len = math.floor(torch.random(min_len, max_len))
-    local seq = generate_sequence(len, input_dim - 2)
+    local seq = generate_sequence(len, config.batch_size, input_dim - 2)
     local outputs, criteria, sample_loss = forward(model, seq, print_flag)
     loss = loss + sample_loss
     backward(model, seq, outputs, criteria)
     if print_flag then
       print("target:")
-      print(seq)
+      print(seq[{{}, 1}])
       print("output:")
-      print(outputs)
+      print(outputs[{{}, 1}])
     end
 
     -- clip gradients
@@ -153,6 +144,5 @@ for iter = 1, num_iters do
     return loss, grads
   end
 
-  --optim.adagrad(feval, params, adagrad_state)
-  ntm.rmsprop(feval, params, rmsprop_state)
+  optim.adam(feval, params, adam_state)
 end
